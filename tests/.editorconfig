@@ -1,0 +1,3 @@
+[*.cs]
+# Имена тестов: Метод_Поведение_Условие
+dotnet_diagnostic.CA1707.severity = none

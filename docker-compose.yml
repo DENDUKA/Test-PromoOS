@@ -1,0 +1,86 @@
+name: taskapi
+
+# Логины/пароли ниже — ЛОКАЛЬНЫЕ значения по умолчанию для демо.
+# Переопределяются переменными окружения или файлом .env (см. README).
+#
+# Наружу публикуются только API и RabbitMQ Management; PostgreSQL и AMQP доступны лишь внутри сети compose,
+# поэтому занятые на машине 5432/5672 не мешают запуску. Порты меняются через API_PORT и RABBITMQ_MANAGEMENT_PORT.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: taskapi
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d taskapi"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      # Не guest: этому пользователю RabbitMQ запрещает подключаться не с localhost.
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-taskapi}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-taskapi}
+    ports:
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672" # Management UI: http://localhost:15672
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  api:
+    build:
+      context: .
+      dockerfile: src/TaskApi/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=taskapi;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+      RabbitMq__HostName: rabbitmq
+      RabbitMq__UserName: ${RABBITMQ_USER:-taskapi}
+      RabbitMq__Password: ${RABBITMQ_PASSWORD:-taskapi}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    # Должен быть больше HostOptions.ShutdownTimeout (10 с), иначе Docker убьёт процесс (SIGKILL)
+    # посреди graceful shutdown.
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # Тесты в контейнере, без локального .NET SDK:
+  #   docker compose --profile tests run --rm tests
+  # Профиль tests не запускается обычным `docker compose up`. Тесты идут в отдельной БД taskapi_tests
+  # (создаётся миграциями), данные сервиса api они не затрагивают.
+  tests:
+    profiles: ["tests"]
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      TASKAPI_TEST_POSTGRES: Host=postgres;Port=5432;Database=taskapi_tests;Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}
+      TASKAPI_TEST_RABBITMQ_HOST: rabbitmq
+      TASKAPI_TEST_RABBITMQ_PORT: "5672"
+      TASKAPI_TEST_RABBITMQ_USER: ${RABBITMQ_USER:-taskapi}
+      TASKAPI_TEST_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-taskapi}
+
+volumes:
+  pgdata:
